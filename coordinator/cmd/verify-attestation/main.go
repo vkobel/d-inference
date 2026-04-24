@@ -8,7 +8,22 @@ import (
 )
 
 func main() {
-	data, err := os.ReadFile("/tmp/eigeninference_attestation.json")
+	args := os.Args[1:]
+	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
+		usage()
+		return
+	}
+	if len(args) != 0 && len(args) != 1 && len(args) != 3 {
+		usage()
+		os.Exit(2)
+	}
+
+	path := "/tmp/eigeninference_attestation.json"
+	if len(args) >= 1 {
+		path = args[0]
+	}
+
+	data, err := os.ReadFile(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "read: %v\n", err)
 		os.Exit(1)
@@ -31,4 +46,21 @@ func main() {
 		fmt.Printf("\n✗ VERIFICATION FAILED: %s\n", result.Error)
 		os.Exit(1)
 	}
+
+	if len(args) == 3 {
+		challengeData := args[1]
+		signature := args[2]
+		if err := attestation.VerifyChallengeSignature(result.PublicKey, signature, challengeData); err != nil {
+			fmt.Fprintf(os.Stderr, "\n✗ CHALLENGE SIGNATURE FAILED: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("\n✓ CHALLENGE SIGNATURE PASSED")
+		fmt.Println("  Same Secure Enclave P-256 identity signed the verifier nonce")
+	}
+}
+
+func usage() {
+	fmt.Fprintln(os.Stderr, "usage:")
+	fmt.Fprintln(os.Stderr, "  verify-attestation [attestation-json]")
+	fmt.Fprintln(os.Stderr, "  verify-attestation [attestation-json] [challenge-data] [signature-b64]")
 }

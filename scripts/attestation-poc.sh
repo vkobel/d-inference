@@ -49,7 +49,16 @@ fi
 
 echo
 echo "==> Verifying attestation in Go"
-(cd "$PROJECT_DIR/coordinator" && go run ./cmd/verify-attestation)
+(cd "$PROJECT_DIR/coordinator" && go run ./cmd/verify-attestation "$ATTESTATION_JSON")
+
+echo
+echo "==> Verifying a fresh challenge signature"
+NONCE="$(openssl rand -base64 32)"
+TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+CHALLENGE_DATA="${NONCE}${TIMESTAMP}"
+CHALLENGE_B64="$(printf "%s" "$CHALLENGE_DATA" | base64 | tr -d '\n')"
+SIGNATURE="$("$ENCLAVE_BIN" sign --data "$CHALLENGE_B64")"
+(cd "$PROJECT_DIR/coordinator" && go run ./cmd/verify-attestation "$ATTESTATION_JSON" "$CHALLENGE_DATA" "$SIGNATURE")
 
 echo
 echo "POC complete."

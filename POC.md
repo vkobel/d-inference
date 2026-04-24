@@ -4,9 +4,10 @@ This POC is a runnable local walkthrough for the macOS attestation pieces that
 exist in this repo today. It demonstrates:
 
 1. Hardened Runtime codesigning on the local enclave CLI.
-2. A Secure Enclave P-256 signing identity created by the current CLI.
+2. A persistent Secure Enclave P-256 signing identity.
 3. A signed JSON attestation blob that binds machine state plus a binary hash.
 4. Independent Go verification of the Swift/CryptoKit signature.
+5. A fresh nonce challenge signed by the same Secure Enclave identity.
 
 Run it from the repo root:
 
@@ -14,8 +15,7 @@ Run it from the repo root:
 ./scripts/attestation-poc.sh
 ```
 
-The script writes the attestation to `/tmp/eigeninference_attestation.json`,
-which is the fixed path read by the existing Go verifier.
+The script writes the attestation to `/tmp/eigeninference_attestation.json`.
 
 For a Developer ID certificate instead of local ad-hoc signing:
 
@@ -53,10 +53,25 @@ enclave/.build/release/eigeninference-enclave attest --binary-hash "$BIN_HASH" \
 (cd coordinator && go run ./cmd/verify-attestation)
 ```
 
+It then signs a fresh verifier nonce and verifies that signature against the
+public key from the attestation:
+
+```bash
+NONCE="$(openssl rand -base64 32)"
+TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+CHALLENGE_DATA="${NONCE}${TIMESTAMP}"
+CHALLENGE_B64="$(printf "%s" "$CHALLENGE_DATA" | base64 | tr -d '\n')"
+SIGNATURE="$(enclave/.build/release/eigeninference-enclave sign --data "$CHALLENGE_B64")"
+
+(cd coordinator && go run ./cmd/verify-attestation \
+  /tmp/eigeninference_attestation.json "$CHALLENGE_DATA" "$SIGNATURE")
+```
+
 Expected result:
 
 ```text
 CROSS-LANGUAGE VERIFICATION PASSED
+CHALLENGE SIGNATURE PASSED
 ```
 
 ## What Each Layer Proves
@@ -64,21 +79,29 @@ CROSS-LANGUAGE VERIFICATION PASSED
 | Layer | Local POC proof | Important limit |
 | --- | --- | --- |
 | Hardened Runtime | `codesign --options runtime` is applied to the enclave CLI without `get-task-allow`. | This protects the signed process while SIP is on. It is not Apple notarization. |
-| Secure Enclave identity | `eigeninference-enclave attest` creates a P-256 key and embeds its public key in the signed blob. | The current CLI key is ephemeral. This proves the blob was signed by a SEP key, not a stable provider identity across invocations. |
+| Secure Enclave identity | `eigeninference-enclave info`, `attest`, and `sign` load the same P-256 key handle from `~/.darkbloom/enclave_key.data`. | The file is an opaque same-device handle, not raw private-key material. |
 | Binary integrity | SHA-256 of the built CLI is embedded in the signed blob. | The demo verifier prints the hash but does not compare it to a release allowlist. Production challenge verification can. |
 | Machine posture | SIP, Secure Boot placeholder, RDMA status, ARV status, serial, chip, and OS are sealed into the signature. | Several posture fields are software-observed locally. Apple-backed MDM/MDA is the production path for stronger evidence. |
-| Freshness | The attestation includes a timestamp. | The source-free local POC does not sign a verifier nonce because the current CLI has no `sign` subcommand. Production challenge-response covers this. |
+| Freshness | A random nonce plus timestamp is signed and verified against the attested public key. | Freshness only matters if the verifier rejects reused or stale nonces. The production coordinator owns that state. |
 
 ## Secure Enclave Key Model
 
-The current upstream CLI creates a fresh `SecureEnclaveIdentity` for each
-command invocation. The attestation is still useful: it contains the public key
-whose private half signed that exact blob, and the Go verifier checks the
-signature against that embedded key.
+The CLI stores only CryptoKit's opaque Secure Enclave key handle:
 
-That means this POC is intentionally about local blob integrity and
-cross-language verification. Stable provider identity and nonce freshness live
-in the provider/coordinator path, not this source-free CLI walkthrough.
+```text
+~/.darkbloom/enclave_key.data
+```
+
+That file is not the raw private key. It lets CryptoKit reload the same key
+from the Secure Enclave on this Mac. Delete it to rotate the local identity:
+
+```bash
+rm ~/.darkbloom/enclave_key.data
+```
+
+The important consequence is that `attest` and `sign` use the same public key.
+The Go verifier first verifies the attestation signature, then uses the
+attestation's `publicKey` to verify the challenge signature.
 
 Relevant implementation:
 
