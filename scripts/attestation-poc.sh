@@ -9,6 +9,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 ENCLAVE_BIN="$PROJECT_DIR/enclave/.build/release/eigeninference-enclave"
 ENTITLEMENTS="$PROJECT_DIR/scripts/entitlements.plist"
 ATTESTATION_JSON="/tmp/eigeninference_attestation.json"
+CHALLENGE_RESPONSE_JSON="/tmp/eigeninference_challenge_response.json"
 SIGN_IDENTITY="${1:--}"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -52,15 +53,25 @@ echo "==> Verifying attestation in Go"
 (cd "$PROJECT_DIR/coordinator" && go run ./cmd/verify-attestation "$ATTESTATION_JSON")
 
 echo
-echo "==> Verifying a fresh challenge signature"
+echo "==> Verifying a fresh challenge response"
 NONCE="$(openssl rand -base64 32)"
 TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-CHALLENGE_DATA="${NONCE}${TIMESTAMP}"
-CHALLENGE_B64="$(printf "%s" "$CHALLENGE_DATA" | base64 | tr -d '\n')"
-SIGNATURE="$("$ENCLAVE_BIN" sign --data "$CHALLENGE_B64")"
-(cd "$PROJECT_DIR/coordinator" && go run ./cmd/verify-attestation "$ATTESTATION_JSON" "$CHALLENGE_DATA" "$SIGNATURE")
+"$ENCLAVE_BIN" challenge-response \
+    --nonce "$NONCE" \
+    --timestamp "$TIMESTAMP" \
+    --binary-hash "$BIN_HASH" \
+    > "$CHALLENGE_RESPONSE_JSON"
+
+if command -v jq >/dev/null 2>&1; then
+    jq . "$CHALLENGE_RESPONSE_JSON"
+else
+    sed -n '1,40p' "$CHALLENGE_RESPONSE_JSON"
+fi
+
+(cd "$PROJECT_DIR/coordinator" && go run ./cmd/verify-attestation "$ATTESTATION_JSON" "$CHALLENGE_RESPONSE_JSON")
 
 echo
 echo "POC complete."
 echo "Attestation JSON: $ATTESTATION_JSON"
+echo "Challenge response JSON: $CHALLENGE_RESPONSE_JSON"
 echo "Binary hash: $BIN_HASH"

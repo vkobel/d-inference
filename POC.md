@@ -8,6 +8,8 @@ exist in this repo today. It demonstrates:
 3. A signed JSON attestation blob that binds machine state plus a binary hash.
 4. Independent Go verification of the Swift/CryptoKit signature.
 5. A fresh nonce challenge signed by the same Secure Enclave identity.
+6. A `status_signature` over the canonical runtime-status payload introduced
+   in the provider/coordinator challenge flow.
 
 Run it from the repo root:
 
@@ -15,7 +17,8 @@ Run it from the repo root:
 ./scripts/attestation-poc.sh
 ```
 
-The script writes the attestation to `/tmp/eigeninference_attestation.json`.
+The script writes the attestation to `/tmp/eigeninference_attestation.json` and
+the local challenge response to `/tmp/eigeninference_challenge_response.json`.
 
 For a Developer ID certificate instead of local ad-hoc signing:
 
@@ -53,25 +56,30 @@ enclave/.build/release/eigeninference-enclave attest --binary-hash "$BIN_HASH" \
 (cd coordinator && go run ./cmd/verify-attestation)
 ```
 
-It then signs a fresh verifier nonce and verifies that signature against the
-public key from the attestation:
+It then signs a fresh verifier nonce plus the current canonical status payload.
+The challenge response JSON mirrors the current provider response fields, with a
+local-only `timestamp` field so the standalone verifier has the same pending
+challenge timestamp the production coordinator keeps in memory:
 
 ```bash
 NONCE="$(openssl rand -base64 32)"
 TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-CHALLENGE_DATA="${NONCE}${TIMESTAMP}"
-CHALLENGE_B64="$(printf "%s" "$CHALLENGE_DATA" | base64 | tr -d '\n')"
-SIGNATURE="$(enclave/.build/release/eigeninference-enclave sign --data "$CHALLENGE_B64")"
+enclave/.build/release/eigeninference-enclave challenge-response \
+  --nonce "$NONCE" \
+  --timestamp "$TIMESTAMP" \
+  --binary-hash "$BIN_HASH" \
+  > /tmp/eigeninference_challenge_response.json
 
 (cd coordinator && go run ./cmd/verify-attestation \
-  /tmp/eigeninference_attestation.json "$CHALLENGE_DATA" "$SIGNATURE")
+  /tmp/eigeninference_attestation.json \
+  /tmp/eigeninference_challenge_response.json)
 ```
 
 Expected result:
 
 ```text
 CROSS-LANGUAGE VERIFICATION PASSED
-CHALLENGE SIGNATURE PASSED
+CHALLENGE RESPONSE PASSED
 ```
 
 ## What Each Layer Proves
@@ -83,6 +91,7 @@ CHALLENGE SIGNATURE PASSED
 | Binary integrity | SHA-256 of the built CLI is embedded in the signed blob. | The demo verifier prints the hash but does not compare it to a release allowlist. Production challenge verification can. |
 | Machine posture | SIP, Secure Boot placeholder, RDMA status, ARV status, serial, chip, and OS are sealed into the signature. | Several posture fields are software-observed locally. Apple-backed MDM/MDA is the production path for stronger evidence. |
 | Freshness | A random nonce plus timestamp is signed and verified against the attested public key. | Freshness only matters if the verifier rejects reused or stale nonces. The production coordinator owns that state. |
+| Runtime status binding | `status_signature` covers nonce, timestamp, SIP, RDMA, Secure Boot, hypervisor, and binary hash using the same canonical JSON as `attestation.BuildStatusCanonical`. | The local Swift CLI sets `hypervisor_active` to false because it is not running the Rust provider's hypervisor path. |
 
 ## Secure Enclave Key Model
 
@@ -101,7 +110,8 @@ rm ~/.darkbloom/enclave_key.data
 
 The important consequence is that `attest` and `sign` use the same public key.
 The Go verifier first verifies the attestation signature, then uses the
-attestation's `publicKey` to verify the challenge signature.
+attestation's `publicKey` to verify the challenge signature and the canonical
+status signature.
 
 Relevant implementation:
 
@@ -121,6 +131,14 @@ The Go verifier preserves the original raw `attestation` JSON bytes before
 parsing. That matters because cross-language JSON re-encoding can differ in
 small ways even when the parsed data is identical. The verifier hashes those
 exact bytes with SHA-256 and calls Go's `ecdsa.Verify`.
+
+The challenge response path signs two payloads:
+
+- `signature`: SHA-256 over `nonce + timestamp`, matching the legacy freshness
+  signature.
+- `status_signature`: SHA-256 over the compact, sorted-key canonical JSON from
+  `coordinator/internal/attestation.BuildStatusCanonical`, matching the current
+  provider challenge response contract.
 
 ## Tamper Check
 
@@ -147,7 +165,7 @@ adds the networked and Apple-backed controls:
 - Provider registration sends the attestation blob over the WebSocket.
 - The coordinator sends attestation challenges every five minutes.
 - Challenge responses include fresh SIP, RDMA, hypervisor, binary, runtime, and
-  model hash state.
+  model hash state. Current providers bind those fields with `status_signature`.
 - Known-good binary/runtime hashes can exclude modified providers from routing.
 - ACME `device-attest-01` and Apple Managed Device Attestation can add
   Apple-signed device evidence and bind it back to the provider's SE key.
