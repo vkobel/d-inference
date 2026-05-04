@@ -82,6 +82,43 @@ CROSS-LANGUAGE VERIFICATION PASSED
 CHALLENGE RESPONSE PASSED
 ```
 
+## Local POC Additions
+
+This branch adds two small local-only conveniences so the POC can run without a
+live provider WebSocket session:
+
+- `eigeninference-enclave challenge-response` in the Swift CLI creates the same
+  cryptographic proof the Rust provider now sends during an attestation
+  challenge.
+- `verify-attestation [attestation-json] [challenge-response-json]` in the Go
+  verifier checks that local proof using the coordinator's existing attestation
+  verification helpers.
+
+Those additions do not replace the production provider/coordinator flow. They
+make the local demo self-contained: one binary creates the attestation and
+challenge response, and one Go command verifies both.
+
+The generated challenge response looks like this:
+
+```json
+{
+  "binary_hash": "<sha256-of-enclave-cli>",
+  "hypervisor_active": false,
+  "nonce": "<coordinator-nonce-base64>",
+  "public_key": "<secure-enclave-p256-public-key-base64>",
+  "rdma_disabled": true,
+  "secure_boot_enabled": true,
+  "signature": "<base64-der-ecdsa-signature>",
+  "sip_enabled": true,
+  "status_signature": "<base64-der-ecdsa-signature>",
+  "timestamp": "<coordinator-timestamp>"
+}
+```
+
+The `timestamp` field is included only in this local JSON file because the
+standalone verifier has no in-memory pending challenge. In production, the
+coordinator already knows the timestamp it sent.
+
 ## What Each Layer Proves
 
 | Layer | Local POC proof | Important limit |
@@ -139,6 +176,22 @@ The challenge response path signs two payloads:
 - `status_signature`: SHA-256 over the compact, sorted-key canonical JSON from
   `coordinator/internal/attestation.BuildStatusCanonical`, matching the current
   provider challenge response contract.
+
+For the local POC above, the canonical status payload is equivalent to:
+
+```json
+{"binary_hash":"<sha256>","hypervisor_active":false,"nonce":"<nonce>","rdma_disabled":true,"secure_boot_enabled":true,"sip_enabled":true,"timestamp":"<timestamp>"}
+```
+
+The Swift CLI uses sorted JSON keys and disables slash escaping so the signed
+bytes match Go's and Rust's canonical encoding. This detail matters because
+base64 nonces and public keys can contain `/`; signing `\/` on one side and
+verifying `/` on the other would fail even though the parsed JSON values look
+identical.
+
+The key security improvement is that the challenge no longer proves only "this
+provider still controls the Secure Enclave key." With `status_signature`, it
+also proves "this exact fresh status payload was signed by that same key."
 
 ## Tamper Check
 
